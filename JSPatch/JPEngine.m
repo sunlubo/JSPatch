@@ -173,17 +173,22 @@ static void (^_exceptionBlock)(NSString *log) = ^void(NSString *log) {
     };
 #endif
 
+    // 定义类
     context[@"_OC_defineClass"] = ^(NSString *classDeclaration, JSValue *instanceMethods, JSValue *classMethods) {
         return defineClass(classDeclaration, instanceMethods, classMethods);
     };
-
+    
+    // 定义协议
     context[@"_OC_defineProtocol"] = ^(NSString *protocolDeclaration, JSValue *instProtocol, JSValue *clsProtocol) {
         return defineProtocol(protocolDeclaration, instProtocol,clsProtocol);
     };
     
+    // 调用实例方法
     context[@"_OC_callI"] = ^id(JSValue *obj, NSString *selectorName, JSValue *arguments, BOOL isSuper) {
         return callSelector(nil, selectorName, arguments, obj, isSuper);
     };
+    
+    // 调用类方法
     context[@"_OC_callC"] = ^id(NSString *className, NSString *selectorName, JSValue *arguments) {
         return callSelector(className, selectorName, arguments, nil, NO);
     };
@@ -215,11 +220,13 @@ static void (^_exceptionBlock)(NSString *log) = ^void(NSString *log) {
         return [[JSContext currentContext][@"_formatOCToJS"] callWithArguments:@[formatOCToJS(obj)]];
     };
     
+    // 获取父类名称
     context[@"_OC_superClsName"] = ^(NSString *clsName) {
         Class cls = NSClassFromString(clsName);
         return NSStringFromClass([cls superclass]);
     };
     
+    //
     context[@"autoConvertOCType"] = ^(BOOL autoConvert) {
         _autoConvert = autoConvert;
     };
@@ -242,6 +249,8 @@ static void (^_exceptionBlock)(NSString *log) = ^void(NSString *log) {
     context[@"resourcePath"] = ^(NSString *filePath) {
         return [_scriptRootDir stringByAppendingPathComponent:filePath];
     };
+    
+    // GCD
 
     context[@"dispatch_after"] = ^(double time, JSValue *func) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(time * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -436,6 +445,14 @@ static char *methodTypesInProtocol(NSString *protocolName, NSString *selectorNam
     return NULL;
 }
 
+// 定义协议
+// defineProtocol(protocolDeclaration, instanceMethods , classMethods)
+// defineProtocol('JPDemoProtocol', {
+//   stringWithRect_withNum_withArray: {
+//     paramsType:"CGRect, float, NSArray*",
+//     returnType:"id"
+//   }, ...
+// }
 static void defineProtocol(NSString *protocolDeclaration, JSValue *instProtocol, JSValue *clsProtocol)
 {
     const char *protocolName = [protocolDeclaration UTF8String];
@@ -447,14 +464,22 @@ static void defineProtocol(NSString *protocolDeclaration, JSValue *instProtocol,
     }
 }
 
+/**
+ 向指定的协议添加方法描述
+ 
+ @param protocol 被添加方法描述的协议
+ @param groupMethods 将要被添加的方法描述
+ @param isInstance 是否为实例方法
+ */
 static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,BOOL isInstance)
 {
     NSDictionary *groupDic = [groupMethods toDictionary];
     for (NSString *jpSelector in groupDic.allKeys) {
-        NSDictionary *methodDict = groupDic[jpSelector];
-        NSString *paraString = methodDict[@"paramsType"];
+        NSDictionary *methodDict = groupDic[jpSelector]; // 方法描述信息
+        NSString *paraString = methodDict[@"paramsType"]; // 参数类型
+        // 获取返回类型，如果返回类型不存在设为“void”
         NSString *returnString = methodDict[@"returnType"] && [methodDict[@"returnType"] length] > 0 ? methodDict[@"returnType"] : @"void";
-        NSString *typeEncode = methodDict[@"typeEncode"];
+        NSString *typeEncode = methodDict[@"typeEncode"]; // 类型编码
         
         NSArray *argStrArr = [paraString componentsSeparatedByString:@","];
         NSString *selectorName = convertJPSelectorString(jpSelector);
@@ -463,11 +488,10 @@ static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,B
             selectorName = [selectorName stringByAppendingString:@":"];
         }
 
-        if (typeEncode) {
+        if (typeEncode) { // 如果存在类型编码，则不需要处理参数类型解析
             addMethodToProtocol(protocol, selectorName, typeEncode, isInstance);
-            
         } else {
-            if (!_protocolTypeEncodeDict) {
+            if (!_protocolTypeEncodeDict) { // 获取常用类型的类型编码信息
                 _protocolTypeEncodeDict = [[NSMutableDictionary alloc] init];
                 #define JP_DEFINE_TYPE_ENCODE_CASE(_type) \
                     [_protocolTypeEncodeDict setObject:[NSString stringWithUTF8String:@encode(_type)] forKey:@#_type];\
@@ -505,6 +529,7 @@ static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,B
                 [_protocolTypeEncodeDict setObject:@"^@" forKey:@"id*"];
             }
             
+            // - (void)addPhoneNumber:(PhoneNumber *)number; => "v24@0:8@1"
             NSString *returnEncode = _protocolTypeEncodeDict[returnString];
             if (returnEncode.length > 0) {
                 NSMutableString *encode = [returnEncode mutableCopy];
@@ -516,7 +541,7 @@ static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,B
                         NSString *argClassName = trim([argStr stringByReplacingOccurrencesOfString:@"*" withString:@""]);
                         if (NSClassFromString(argClassName) != NULL) {
                             argEncode = @"@";
-                        } else {
+                        } else { // 类型不存在
                             _exceptionBlock([NSString stringWithFormat:@"unreconized type %@", argStr]);
                             return;
                         }
@@ -529,6 +554,14 @@ static void addGroupMethodsToProtocol(Protocol* protocol,JSValue *groupMethods,B
     }
 }
 
+/**
+ 添加方法描述到Protocol中
+ 
+ @param protocol protocol
+ @param selectorName selector
+ @param typeencoding 类型编码
+ @param isInstance 是否为实例方法
+ */
 static void addMethodToProtocol(Protocol* protocol, NSString *selectorName, NSString *typeencoding, BOOL isInstance)
 {
     SEL sel = NSSelectorFromString(selectorName);
@@ -1630,6 +1663,12 @@ static BOOL blockTypeIsScalarPointer(NSString *typeString)
             !NSClassFromString(typeWithoutAsterisk));
 }
 
+/**
+ 将JS里面的Selector描述转换为ObjC的Selector描述，如：stringWithRect_withNum_withArray => stringWithRect:withNum:withArray
+
+ @param selectorString JS格式的selector
+ @return ObjC格式的selector
+ */
 static NSString *convertJPSelectorString(NSString *selectorString)
 {
     NSString *tmpJSMethodName = [selectorString stringByReplacingOccurrencesOfString:@"__" withString:@"-"];
